@@ -1,0 +1,506 @@
+---
+title: 'Homework 2: Linear Regression and Gaussian Linear Modeling'
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+---
+# Linear Regression and Gaussian Linear Modeling
+First, we need the load the packages.
+```{r load_package}
+if (! "pacman" %in% installed.packages()[,1])
+  install.packages("pacman")
+
+p_load <- pacman::p_load
+
+p_load("MASS")
+p_load("tidyverse")
+p_load("chi")
+p_load("mvtnorm")
+p_load("ggdist")
+p_load("expm")
+
+set.seed(1337) # Seed for reproducibility
+```
+
+# Homework 2: Linear Regression and Gaussian Linear Modeling
+
+Due date : **2023-05-31 @23h55** (this is a **hard deadline**)
+
+## Fill this with your names
+
+-   Marie-Anne, Julien, MIDS (22211947)
+-   Gueye, Cheikh Mouhamadou Moustapha, MIDS (22220071)
+
+## Introduction
+
+```{r load_data}
+whitesite <- MASS::whiteside
+```
+
+We fit a linear model to explain `Gas`, in function of `Insul` and `Temp`. We are searching for a polynomial connection between those variables.
+```{r linear_model}
+lm2 <- lm(Gas ~ poly(Temp, degree=2, raw=T) * Insul, data=whiteside)
+lm2
+```
+
+
+```{r extract}
+beta_hat <- coef(lm2)
+X <- model.matrix(lm2)
+sigma_hat<- summary(lm2)$sigma
+
+# We also retrieve number of rows (which is 56) of the data frame. It will be useful later.
+n = nrow(whiteside)
+```
+
+## Simulate random data conforming to GLM with fixed design.
+
+We generate 1000 instances of type:
+$$Y = X\hat{\beta} + \hat{\sigma}\epsilon$$ 
+
+with $\epsilon \sim \mathcal{N}(0, Id_{56})$.
+
+And we calculate the estimator of the least squares for all instances.
+
+```{r simulation}
+N <- 1000
+# Generate N (=1000) gaussian vectors with mean 0_n and covariance matrix sigma_hat^2 * I_n. 
+noise <- mvrnorm(n=N, mu=rep(0, n), Sigma=sigma_hat**2*diag(n))
+predicted_values <- X %*% beta_hat
+# We create a matrix of dimension (N, n) = (1000, 56)
+Y <- rep(predicted_values, each = N) + noise
+
+# For each row of the matrix, we fit a linear model. Returns a list of linear models.
+models <- apply(Y, MARGIN=1, FUN=function(vec) lm(vec ~ poly(Temp, degree=2, raw=T) * Insul, data = whiteside))
+# We extract standard deviations and coefficient vectors.
+sigma_hat_star <- sapply(models, function(model) summary(model)$sigma)
+beta_hat_star <- sapply(models, function(model) coef(model))
+
+k <- ncol(X)
+```
+
+## Distribution of estimators of noise variance
+
+Thanks to Cochran's theorem, we can show that ${\sigma^*}^2 \sim \frac{\hat{\sigma}^2}{n-k} \chi^2(n-k)$.
+
+Thus, we have
+$$\sigma^* \sim \frac{\hat{\sigma}}{\sqrt{n-k}} \chi(n-k)$$.
+
+To obtain the theoretical density of $\sigma^*$, we use a general result:
+Let $f$ be the density of a random variable $X$. Then the density of the random variable $a+bX$ is $\frac{1}{b}f(\frac{. - a}{b})$ for $b \ne 0$.
+
+Thus, the theoretical density of $\sigma^*$ is:
+$$\frac{\sqrt{n-k}}{\hat{\sigma}} f_{n-k}\left(\frac{. \sqrt{n-k}}{\hat{\sigma}}\right)$$
+
+where $f_{n-k}$ is the density of a Chi distribution with parameter $n-k$.
+
+We can see the result below:
+
+```{r histogram}
+sigma_hat_star_theoric_d <- function(x) 
+{
+  sqrt(n-k) / sigma_hat * dchi(x * sqrt(n-k) / sigma_hat, df=n-k)
+}
+  
+sigma_hat_star_tibble <- tibble(x=sigma_hat_star)
+sigma_hat_star_tibble %>%
+  ggplot() +
+  aes(x=x) +
+  geom_histogram(aes(y=..density..),
+                 alpha=.5,
+                 fill="white",
+                 colour="black",
+                 bins=30) +
+  stat_function(fun = sigma_hat_star_theoric_d, linetype=2, color='red') +
+  ggtitle("Histogram of estimators of the noise standard deviation")
+```
+
+
+To determine the theoretical cumulative distribution function, we use another result, which is:
+Let $F$ the CDF of a random variable $X$, then the CDF of the random variable $a+bX$ is $F(\frac{. - a}{b})$ for $b \ne 0$.
+
+Thus, we conclude from the distribution of $\sigma^*$ that the CDF of $\sigma^*$ is 
+$$F_{n-k}\left(. \frac{\sqrt{n-k}}{\hat{\sigma}}\right)$$,
+where $F_{n-k}$ is the CDF of the distribution $\chi\left(n-k\right)$
+
+```{r ECDF}
+sigma_hat_star_theoric_p <- function(x)
+{
+  pchi(x * sqrt(n-k)/sigma_hat, df=n-k)
+}
+  
+sigma_hat_star_tibble %>%
+  ggplot() +
+  aes(x=x) +
+  geom_step(stat="ecdf") +
+  ylab("ECDF") +
+  xlab("x") +
+  stat_function(fun = sigma_hat_star_theoric_p, linetype=2, color='red') +
+  ggtitle("ECDF of estimators of the noise variance")
+```
+
+We can also make a Q-Q plot to compare the distribution of estimators of the noise variance with the theoretical distribution.
+To find the theoretical quantile of $\sigma^*$, we can use the following result:
+Let $X$ a random variable with a continuous CDF (we are not interested in non continuous CDF in our case), let $q_X(p)$ be the quantile function of X. Then the quantile function of $Y = a+bX$ with $b > 0$ is $q_Y(p) = a + bq_X(p)$.
+
+We use this result to show that the quantile function of $\sigma^*$ is: $\frac{\hat{\sigma}}{\sqrt{n-k}} q_{\chi\left(n-k\right)}$.
+
+```{r quantile plot}
+
+sigma_hat_star_theoric_q <- function(p)
+{
+  sigma_hat / sqrt(n-k) * qchi(p, df=n-k)
+}
+
+# Evaluates theoretical quantiles with a sequence of probability points.
+theoretical_quantiles <- sigma_hat_star_theoric_q(ppoints(N))
+
+qqnorm(sigma_hat_star, main = "QQ Plot of Estimators of Noise Variance")
+qqline(theoretical_quantiles, col = "red")
+
+```
+
+## Fluctuations of coefficients estimates (I)
+
+We know that $\hat{\beta^*} \sim \mathcal{B}\left(\hat{\beta}, \hat{\sigma}^2 (X^TX)^{-1}\right)$.
+Thus, to obtain the theoretical join distribution of $(\hat{\beta}_i[1], \hat{\beta}_i[2])$, we have to take a subvector of $\hat{\beta}$, and a submatrix of $\hat{\sigma}^2 (X^TX)^{-1}$.
+
+Below, we draw empirical density and theoretical density:
+```{r fluctuation coefficient}
+beta_hat_star_tibble <- tibble(x=beta_hat_star[1,], y=beta_hat_star[2,])
+
+beta_hat_star_tibble %>%
+  ggplot() +
+  aes(x=x, y=y) +
+  geom_density_2d_filled() +
+  ggtitle("Empirical density of joint distribution") +
+  xlim(6.25, 7.25) +
+  ylim(-0.5, -0.1)
+
+# We draw theoretical 2d density.
+theoretical_beta_hat_star_df <- as.data.frame(mvrnorm(n=N, mu=c(beta_hat[1], beta_hat[2]), Sigma=sigma_hat**2 * solve(t(X)%*%X)[1:2, 1:2])) %>%
+  rename("x" = "(Intercept)") %>%
+  rename("y" = "poly(Temp, degree = 2, raw = T)1")
+
+theoretical_beta_hat_star_df %>%
+  ggplot() +
+  aes(x = x, y = y) +
+  geom_density_2d_filled() +
+  ggtitle("Theoretical density of joint distribution") +
+  xlim(6.25, 7.25) +
+  ylim(-0.5, -0.1)
+
+```
+
+
+# Fluctuations of coefficients estimates (II) : Studentized statistics
+
+We chose $A = (X^TX)^{1/2}$, and then we calculate $A\frac{(\hat{\beta^*} - \hat{\beta})}{\hat{\sigma}}$, which gives us a vector in $\mathbb{R}^k$. From the statistical course, we know that each coordinate of this vector has a student distribution of parameter $n-k$, in other words, $\frac{(X^T X)^{1/2}_{ii}((\hat{\beta^*}[j])_{i} - \hat{\beta}_i)}{\hat{\sigma}}$ for all $j \in \{1, \dots, N\}$.
+
+
+```{r studentized statistics}
+A <- sqrtm(t(X) %*% X)
+statistic <- A %*% (beta_hat_star - beta_hat) / sigma_hat
+studentized_statistic <- statistic[1,] # We take only one coordinate.
+studentized_statistic_tibble <- tibble(x=studentized_statistic)
+```
+
+
+```{r student density}
+# Let's make a histogram plot.
+theoretical_student_d <- function(x)
+{
+  dt(x, df=n-k)
+}
+studentized_statistic_tibble %>%
+  ggplot() +
+  aes(x=x) +
+  geom_histogram(aes(y=..density..),
+                 alpha=.5,
+                 fill="white",
+                 colour="black",
+                 bins=30) +
+  stat_function(fun = theoretical_student_d, linetype=2, color='red') +
+  ggtitle("Histogram of estimators of the noise standard deviation")
+```
+
+```{r student CDF}
+# CDF plot
+theoretical_student_p <- function(q)
+{
+  pt(q, df=n-k)
+}
+  
+studentized_statistic_tibble %>%
+  ggplot() +
+  aes(x=x) +
+  geom_step(stat="ecdf") +
+  ylab("ECDF") +
+  xlab("q") +
+  stat_function(fun = theoretical_student_p, linetype=2, color='red') +
+  ggtitle("ECDF of Student distribution")
+```
+
+```{r student quantile}
+theoretical_student_q <- function(p)
+{
+  qt(p, df=n-k)
+}
+
+# Evaluates theoretical quantiles with a sequence of probability points.
+theoretical_quantiles <- theoretical_student_q(ppoints(N))
+
+qqnorm(studentized_statistic, main = "QQ Plot student distribution")
+qqline(theoretical_quantiles, col = "red")
+```
+
+## Regression of $\hat{\beta}[1]^*$ with respects to all other estimated coefficients $\hat{\beta}[2, \dots, 6]^*$
+
+We can see from the graphic below that $\hat{\beta}^*[1] - \mathbb{E}(\hat{\beta}^*[1] \; | \; \hat{\beta}^*[2] \dots \hat{\beta}^*[6])$ has a normal distribution.
+
+```{r regression coefficients}
+conditional_expectations <- aggregate(beta_hat_star[1,] ~ beta_hat_star[2,] + beta_hat_star[3,] + beta_hat_star[4,] + beta_hat_star[5,] + beta_hat_star[6,], FUN = mean)
+diff <- beta_hat_star[1,] - conditional_expectations["beta_hat_star[1, ]"]
+
+diff %>%
+  ggplot() +
+  aes(x=`beta_hat_star[1, ]`) +
+  geom_histogram(aes(y=..density..),
+                 alpha=.5,
+                 fill="white",
+                 colour="black",
+                 bins=30) 
+```
+
+## Diagnostic plots when the GLM assumptions hold
+
+To draw a diagnostic plot, we take the first linear fit on the simulated data.
+
+### Residuals vs Fitted
+We see that residuals are equally spread around almost a horizontal line, which is a good indication that there are linear relationships between the response variable and explanatory variables. This is the case because this is how we simulated the response variable.
+
+### Normal Q-Q
+This plot is a Q-Q plot comparing the quantile function of the standardized residuals with a normal distribution. We see that the residuals follow a straight line which is a good indication that residuals have a normal distribution.
+
+### Scale-Location
+This plot tests the homoscedasticity of the model. We can conclude that residuals have equal variable if it spreads equally along the fitted values: in this case we obtain a horizontal line. In our case, we see that the line is not completely horizontal.
+
+### Residuals vs Leverage
+This plot is useful to see influential points, which means points that have a big impact on the the least squares analysis. Those points are outside the dashed line at the upper right corner, and lower right corner. In our plot, we can see no point in those area, thus we can conclude that our model doesn't have an influential point.
+
+```{r diagnostic plots}
+first_model <- models[[1]] # We take the first model.
+plot(first_model) # Plot the four diagnostic plots.
+```
+
+## Overparametrized model
+
+```{r overparametrized}
+# We define theta_hat as beta_hat by zeroing the quadratic terms.
+theta_hat <- beta_hat
+# Zeroing the coefficients corresponding to the quadratic terms.
+theta_hat[3] <- 0
+theta_hat[6] <- 0
+
+N <- 1000
+# Generate N (=1000) gaussian vectors with mean 0_n and covariance matrix sigma_hat^2 * I_n. 
+noise <- mvrnorm(n=N, mu=rep(0, n), Sigma=sigma_hat**2*diag(n))
+
+predicted_values <- X %*% theta_hat
+# We create a matrix of dimension (N, n) = (1000, 56)
+Y_overparam <- rep(predicted_values, each = N) + noise
+```
+
+## Estimators of noise variance
+
+```{r estimators noise variance}
+# For each row of the matrix, we fit a linear model. Returns a list of linear models.
+models_overparam <- apply(Y_overparam, MARGIN=1, FUN=function(vec) lm(vec ~ poly(Temp, degree=2, raw=T) * Insul, data = whiteside))
+# We extract standard deviations and coefficient vectors.
+sigma_overparam <- sapply(models_overparam, function(model) summary(model)$sigma)
+theta_overparam <- sapply(models_overparam, function(model) coef(model))
+```
+
+## Student's tests for coefficients
+
+In this section, we do student test's for the coefficients of $\hat{\beta}$ corresponding to the quadratic terms with respect to Temp. 
+We want to see if the quadratic terms are influential coefficients, i.e we take two null hypothesis : $H^{1}_0: \hat{\beta}[3] = 0$ et $H^{2}_0: \hat{\beta}[6] = 0$.
+
+We know from the statistical course that for all $i \in \{1, \dots N\}$ and all $j \in \{1, \dots, k\}$, the statistic $T_i = \frac{\hat{\beta_i}^*[j] - \hat{\beta}_i}{\sigma_i^* \sqrt{s_j}}$ has a student distribution of parameter $n-k$, with $s_j = (X^TX)^{-1}_{jj}$.
+
+Under null hypothesis $H^{1}_0$ and $H^2_0$, for all $i \in \{1, \dots N\}$, we have $T^1_i = \frac{\hat{\beta_i}^*[3]}{\sigma_i^* \sqrt{s_3}}$ and $T^2_i = \frac{\hat{\beta_i}^*[6]}{\sigma_i^* \sqrt{s_6}}$.
+
+The p-value is defined for all $i \in \{1, \dots N\}$ as $p^k_i = 2(1 - F(\vert T^k_i \vert))$ with $k \in \{1, 2\}$, and $F$ is the CDF of student distribution of parameter $n-k$.
+
+```{r student tests}
+S <- solve(t(X) %*% X)
+# Calculate the p_values for the first quadratic term...
+t_statistics_term_1 <- beta_hat_star[3,]/(sigma_hat_star*sqrt(S[3,3]))
+p_values_term_1 <- 2*(1 - pt(abs(t_statistics_term_1), df=n-k))
+
+#... and the second quadratic term.
+t_statistics_term_2 <- beta_hat_star[6,]/(sigma_hat_star*sqrt(S[6,6]))
+p_values_term_2 <- 2*(1 - pt(abs(t_statistics_term_2), df=n-k))
+```
+
+If we set the significance level to 5%, we can count the number of times we reject null hypothesis in the following cell:
+
+```{r student reject1}
+significance_level <- 0.05
+sum(p_values_term_1 <= significance_level) # Count number of time we reject null hypothesis for the first quadratic term.
+```
+
+```{r student reject2}
+sum(p_values_term_2 <= significance_level) # Count number of time we reject null hypothesis for the second quadratic term.
+```
+
+We can also plot the t statistics $\vert T_i^k\vert$ as an histogram.
+```{r tibbles}
+# Create tibbles
+t_stats_abs_tibble_1 <- tibble(x=abs(t_statistics_term_1))
+t_stats_abs_tibble_2 <- tibble(x=abs(t_statistics_term_2))
+```
+
+```{r plot first quadratic term}
+t_stats_abs_tibble_1 %>%
+  ggplot() +
+  aes(x=x) +
+  geom_histogram(aes(y=..density..),
+                 alpha=.5,
+                 fill="white",
+                 colour="black",
+                 bins=30) +
+  ggtitle("Absolute value of the T-values for the first quadratic term.")
+```
+
+```{r plot second quadratic term}
+t_stats_abs_tibble_2 %>%
+  ggplot() +
+  aes(x=x) +
+  geom_histogram(aes(y=..density..),
+                 alpha=.5,
+                 fill="white",
+                 colour="black",
+                 bins=30) +
+  ggtitle("Absolute value of the T-values for the second quadratic term.")
+```
+
+## Fisher's test
+
+We recall that we defined $\hat{\theta}$ by zeroing the coefficients of $\hat{\beta}$ corresponding to the quadratic terms. Then, we generated N = 1000 instances of the Gaussian Linear Model with $\hat{\theta}$ as coefficients. Let's call $\bar{\theta}_i$ the ith coefficient obtained with the least square method, and $\bar{\sigma}_i$ the estimated standard deviation. 
+
+Let's take the notation from the statistic course. We are interesting into testing the following null hypothesis: $H_0: \hat{\theta}[3] = \hat{\theta}[6] = 0$ versus the alternative hypothesis $H_1: \hat{\theta}[3] \ne 0 \text{ or } \hat{\theta}[6] \ne 0$.
+
+Let the vector subspace $W_0 = \{u \in \mathbb{R}^k \text{ | } u_3 =  u_6 = 0\}$.
+We can write $H_0: \theta \in W_0$ versus $H_1: \theta \notin W_0$.
+Let $V_0$ the range of $W_0$ by $X$, i.e: $V_0 = X(W_0)$. In our example, $V_0$ is the subspace generated by all linear combinations of the columns 1, 2, 4, and 5 of X.
+Thus $V_0^\perp = \text{span}\{X_3, X_6\}$ where $X_j$ is the jth column of the matrix X.
+
+Let $k_0$ be the dimension of $W_0$. Here we have $k_0 = 4$
+
+Under the null hypothesis $H_0$, we have for all $i \in \{1, \dots, N\}$, the statistic $S_i = \frac{\Vert \pi_{V_0^\perp}(X\bar{\theta}_i) \Vert^2 / (k - k_0)}{(\bar{\sigma}_i)^2} \sim \mathcal{F}(k-k_0, n - k)$.
+
+We do a one-tail test, and then deduce for all $i \in \{1, \dots, N\}$ a p-value equals to $p_i = 1 - G(S_i)$, where $G$ is the CDF of $\mathcal{F}(k-k_0, n - k)$
+
+```{r}
+k0 <- 4
+```
+
+```{r H_0 is true}
+# Calculate norm of type 2.
+normType2 <- function(x)
+{
+  norm(x, type="2")
+}
+
+M <- matrix(c(X[,1], X[,2], X[,4], X[,5]), ncol = 4)
+# Calculate the projection matrix of V_0.
+P <- M %*% solve(t(M) %*% M) %*% t(M)
+# Calculate the projection matrix of V_0^\perp
+P_perp <- diag(n) - P
+proj_V_0_perp <- P_perp %*% (X %*% theta_overparam)
+# Calculate the S statistics.
+S <- apply(proj_V_0_perp, MARGIN=2, FUN=normType2)**2 / (sigma_overparam**2*(k-k0))
+
+# Calculate the p-values.
+p_values_F <- 1 - pf(S, df1=k-k0, df2=n-k)
+
+significance_level <- 0.01
+# Count the number of times we reject H_0.
+sum(p_values_F <= significance_level)
+```
+```{r plot S}
+fisher_d <- function(x)
+{
+  df(x, df1=k-k0, df2=n-k)
+}
+
+s_stats_tibble <- tibble(x=abs(S))
+s_stats_tibble %>%
+  ggplot() +
+  aes(x=x) +
+  geom_histogram(aes(y=..density..),
+                 alpha=.5,
+                 fill="white",
+                 colour="black",
+                 bins=30) +
+  stat_function(fun = fisher_d, linetype=2, color='red') +
+  ggtitle("Fisher statistics when null hypothesis is true")
+
+```
+
+Let's comment the result of the above cell. For our current execution, we reject 10 times the null hypothesis. We can't help to notice that 10 is equal to 0.01*N. We know that the null hypothesis is true because we defined $\hat{\theta}$ in such way that $\hat{\theta}_3 = \hat{\theta}_6 = 0$. In addition, all the hypothesis that comes from the theory of Gaussian Linear Model is true (linearity, homoscedasticity, i.i.d, ...) in our case because this is how we generated the instances. Thus, we can trust our result, and this result tells us that there is 1% chance to reject H_0 when it is true. This is exactly what we get.
+
+In the following cell, we are going to suppose that the null hypothesis is not true. We know from a result of the statistic course that we have for all $i \in \{1, \dots, N\}$, the statistic $Z_i = \frac{\Vert \pi_{V_0^\perp}(X\bar{\theta}_i) \Vert^2 / (k - k_0)}{(\bar{\sigma}_i)^2} \sim \mathcal{F}(k-k_0, n - k, \Vert \mu \Vert )$, where $\mu = \pi_{V_0^\perp}(X\hat{\theta})$.
+
+```{r H_0 is false}
+
+# TODO
+```
+
+## Departing from the Gaussian Linear Model assumptions
+
+We replace the Gaussian noise with Student's noise with four degrees of freedom for the instances with overparametrization.
+
+```{r}
+p_load('mvtnorm') # To generate multidimensional Student variables.
+noise <- rmvt(n = N, sigma= diag(n), df = 4)
+predicted_values <- X %*% theta_hat
+Y <- rep(predicted_values, each = N) + noise
+
+# fit linear model
+models_t_overparam <- apply(Y, MARGIN=1, FUN=function(vec) lm(vec ~ poly(Temp, degree=2, raw=T) * Insul, data = whiteside))
+sigma_hat_t_overparam <- sapply(models_t_overparam, function(model) summary(model)$sigma)
+theta_hat_t_overparam <- sapply(models_t_overparam, function(model) coef(model))
+```
+
+```{r}
+proj_V_0_perp_overparam <- P_perp %*% (X %*% theta_hat_t_overparam)
+# Calculate the S statistics.
+S_overparam <- apply(proj_V_0_perp_overparam, MARGIN=2, FUN=normType2)**2 / (sigma_hat_t_overparam**2*(k-k0))
+
+# Calculate the p-values.
+p_values_F <- 1 - pf(S_overparam, df1=k-k0, df2=n-k)
+
+significance_level <- 0.01
+# Count the number of times we reject H_0.
+sum(p_values_F <= significance_level)
+```
+
+```{r plot}
+s_stats_overparam_tibble <- tibble(x=abs(S_overparam))
+s_stats_overparam_tibble %>%
+  ggplot() +
+  aes(x=x) +
+  geom_histogram(aes(y=..density..),
+                 alpha=.5,
+                 fill="white",
+                 colour="black",
+                 bins=30) +
+  stat_function(fun = fisher_d, linetype=2, color='red') +
+  ggtitle("Fisher statistics when null hypothesis is true with student distribution")
+```
+
+
+  
